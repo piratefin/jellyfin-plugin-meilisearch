@@ -249,28 +249,44 @@ public class MeilisearchMutateFilter(
         var limit = context.ActionArguments.TryGetValue("limit", out var limitObj)
             ? (int)limitObj!
             : 0;
-        var limitPreItem = filteredTypes.Count > 0 && limit > 0
-            ? Math.Clamp(limit / filteredTypes.Count, 30, 100)
-            : 30;
+
+        // OPTIMIZATION: Much smaller limit for Person searches to reduce GetItemById calls
+        var isPersonOnly = filteredTypes.Count == 1 && 
+                           filteredTypes[0] == JellyfinTypeMap["Person"];
+        var effectiveLimit = isPersonOnly ? Math.Min(limit > 0 ? limit : 5, 10) : limit;
+        var limitPreItem = filteredTypes.Count > 0 && effectiveLimit > 0
+            ? Math.Clamp(effectiveLimit / filteredTypes.Count, isPersonOnly ? 5 : 30, isPersonOnly ? 10 : 100)
+            : (isPersonOnly ? 5 : 30);
+
         var meilisearchItems = await Search(ch.Index, searchTerm, filteredTypes, additionalFilters, limitPreItem);
 
-        // remove items that are not visible to the user
-        var items = meilisearchItems.Select(it =>
+        // OPTIMIZATION: Early exit with target count to minimize GetItemById calls
+        var targetCount = effectiveLimit > 0 ? effectiveLimit : (isPersonOnly ? 5 : 30);
+        var items = new List<BaseItem>();
+
+        foreach (var meilisearchItem in meilisearchItems)
         {
-            var item = libraryManager.GetItemById(Guid.Parse(it.Guid));
-            return (item?.IsVisibleStandalone(user) ?? false) ? item : null;
-        }).Where(it => it is not null)!.ToImmutableList<BaseItem>();
+            if (items.Count >= targetCount) break; // Early exit once we have enough results
+            
+            var item = libraryManager.GetItemById(Guid.Parse(meilisearchItem.Guid));
+            if (item?.IsVisibleStandalone(user) == true)
+            {
+                items.Add(item);
+            }
+        }
+
+        var finalItems = items.ToImmutableList<BaseItem>();
 
 
         var notFallback = !(Plugin.Instance?.Configuration.FallbackToJellyfin ?? false);
-        if (items.Count > 0 || notFallback)
+        if (finalItems.Count > 0 || notFallback)
         {
-            SetQueryResult(context, user, items);
-            return new MutateResult(true, items.Count);
+            SetQueryResult(context, user, finalItems);
+            return new MutateResult(true, finalItems.Count);
         }
 
-        logger.LogDebug("Not mutate request: results={hits}, fallback={fallback}", items.Count, !notFallback);
-        return new MutateResult(notFallback, items.Count);
+        logger.LogDebug("Not mutate request: results={hits}, fallback={fallback}", finalItems.Count, !notFallback);
+        return new MutateResult(notFallback, finalItems.Count);
     }
 
     private IEnumerable<string> ToJellyfinTypes(IEnumerable<string> types)
