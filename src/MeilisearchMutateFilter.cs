@@ -77,6 +77,78 @@ public class MeilisearchMutateFilter(
     }.ToFrozenDictionary();
 
     /// <summary>
+    /// Gets the search result limit for a given item type based on priority.
+    /// High Priority (Primary Content): Movie, Series - 20
+    /// Medium Priority (Secondary Content): Episode, Season - 5
+    /// Low Priority (Supplementary): Person - 5
+    /// Very Low Priority (Others): MusicArtist, Genre, and all other types - 3
+    /// </summary>
+    /// <param name="itemType">The full type name of the item.</param>
+    /// <returns>The limit for this item type.</returns>
+    private int GetLimitForType(string itemType)
+    {
+        // High Priority: Movie, Series
+        if (itemType == JellyfinTypeMap["Movie"] || itemType == JellyfinTypeMap["Series"])
+        {
+            return 20;
+        }
+
+        // Medium Priority: Episode, Season
+        if (itemType == JellyfinTypeMap["Episode"] || itemType == JellyfinTypeMap["Season"])
+        {
+            return 5;
+        }
+
+        // Low Priority: Person
+        if (itemType == JellyfinTypeMap["Person"])
+        {
+            return 5;
+        }
+
+        // Very Low Priority: MusicArtist, Genre, and all other types
+        if (itemType == JellyfinTypeMap["MusicArtist"] || itemType == JellyfinTypeMap["Genre"])
+        {
+            return 3;
+        }
+
+        return 3;
+    }
+
+    /// <summary>
+    /// Gets the priority order for sorting results (lower number = higher priority).
+    /// </summary>
+    /// <param name="itemType">The full type name of the item.</param>
+    /// <returns>The priority order (1 = highest, 4 = lowest).</returns>
+    private int GetPriorityOrder(string itemType)
+    {
+        // High Priority: Movie, Series
+        if (itemType == JellyfinTypeMap["Movie"] || itemType == JellyfinTypeMap["Series"])
+        {
+            return 1;
+        }
+
+        // Medium Priority: Episode, Season
+        if (itemType == JellyfinTypeMap["Episode"] || itemType == JellyfinTypeMap["Season"])
+        {
+            return 2;
+        }
+
+        // Low Priority: Person
+        if (itemType == JellyfinTypeMap["Person"])
+        {
+            return 3;
+        }
+
+        // Very Low Priority: MusicArtist, Genre, and all other types
+        if (itemType == JellyfinTypeMap["MusicArtist"] || itemType == JellyfinTypeMap["Genre"])
+        {
+            return 4;
+        }
+
+        return 4;
+    }
+
+    /// <summary>
     /// check if the user is api key https://github.com/jellyfin/jellyfin/blob/master/Jellyfin.Api/Extensions/ClaimsPrincipalExtensions.cs #GetIsApiKey
     /// </summary>
     /// <param name="context">The action context</param>
@@ -127,9 +199,8 @@ public class MeilisearchMutateFilter(
     private async Task<IReadOnlyCollection<MeilisearchItem>> Search(
         Index index,
         string searchTerm,
-        List<string> itemTypes,
-        List<KeyValuePair<string, string>> additionalFilters,
-        int limitPerType
+        Dictionary<string, int> typeLimits,
+        List<KeyValuePair<string, string>> additionalFilters
     )
     {
         List<MeilisearchItem> items = [];
@@ -137,14 +208,14 @@ public class MeilisearchMutateFilter(
         {
             var additionQuery = additionalFilters.Select(it => $"{it.Key} = {it.Value}").ToList();
             var additionQueryStr = additionQuery.Count > 0 ? $" AND {string.Join(" AND ", additionQuery)}" : "";
-            foreach (var itemType in itemTypes)
+            foreach (var (itemType, limit) in typeLimits)
             {
                 var results = await index.SearchAsync<MeilisearchItem>(
                     searchTerm,
                     new SearchQuery
                     {
                         Filter = $"type = \"{itemType}\" {additionQueryStr}",
-                        Limit = limitPerType,
+                        Limit = limit,
                         AttributesToSearchOn = Plugin.Instance?.Configuration.AttributesToSearchOn
                     }
                 );
@@ -250,21 +321,28 @@ public class MeilisearchMutateFilter(
             ? (int)limitObj!
             : 0;
 
-        // OPTIMIZATION: Much smaller limit for Person searches to reduce GetItemById calls
-        var isPersonOnly = filteredTypes.Count == 1 && 
-                           filteredTypes[0] == JellyfinTypeMap["Person"];
-        var effectiveLimit = isPersonOnly ? Math.Min(limit > 0 ? limit : 5, 10) : limit;
-        var limitPreItem = filteredTypes.Count > 0 && effectiveLimit > 0
-            ? Math.Clamp(effectiveLimit / filteredTypes.Count, isPersonOnly ? 5 : 30, isPersonOnly ? 10 : 100)
-            : (isPersonOnly ? 5 : 30);
+        // Build dictionary of type limits based on priority
+        var typeLimits = new Dictionary<string, int>();
+        foreach (var itemType in filteredTypes)
+        {
+            typeLimits[itemType] = GetLimitForType(itemType);
+        }
 
-        var meilisearchItems = await Search(ch.Index, searchTerm, filteredTypes, additionalFilters, limitPreItem);
+        var meilisearchItems = await Search(ch.Index, searchTerm, typeLimits, additionalFilters);
 
-        // OPTIMIZATION: Early exit with target count to minimize GetItemById calls
-        var targetCount = effectiveLimit > 0 ? effectiveLimit : (isPersonOnly ? 5 : 30);
+        // Order results by priority (Movies/Series first, then Episodes/Seasons, then Persons, then others)
+        var orderedItems = meilisearchItems
+            .OrderBy(item => GetPriorityOrder(item.Type ?? string.Empty))
+            .ToList();
+
+        // Calculate target count: if limit is specified, use it; otherwise use sum of all type limits
+        var targetCount = limit > 0 
+            ? limit 
+            : typeLimits.Values.Sum();
+
         var items = new List<BaseItem>();
 
-        foreach (var meilisearchItem in meilisearchItems)
+        foreach (var meilisearchItem in orderedItems)
         {
             if (items.Count >= targetCount) break; // Early exit once we have enough results
             
