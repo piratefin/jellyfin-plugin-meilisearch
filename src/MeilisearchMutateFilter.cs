@@ -450,9 +450,8 @@ public static class ActionExecutingContextExtensions
         return userManager.GetUserById(userId.Value);
     }
 
-    /// should be ["/Users/{userId}/Items", "/Persons", "/Artists/AlbumArtists", "/Artists", "/Genres"];
-    /// but now only /Items
-    private static readonly Collection<string> MatchingPaths = ["/Items"];
+    /// Paths that support search term interception for Meilisearch
+    private static readonly Collection<string> MatchingPaths = ["/Items", "/Persons", "/Artists", "/AlbumArtists", "/Genres"];
 
 
     public static string? GetSearchTerm(this ActionExecutingContext context)
