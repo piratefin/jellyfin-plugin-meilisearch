@@ -270,6 +270,8 @@ public class MeilisearchMutateFilter(
         // mediaTypes add types from the search
         var mediaTypes = context.GetQueryCommaOrMulti("mediaTypes");
         logger.LogDebug("mediaTypes={mediaTypes}", string.Join(", ", mediaTypes));
+
+        var path = context.HttpContext.Request.Path.ToString();
         if (mediaTypes != null && mediaTypes.Count > 0)
         {
             // If mediaTypes is set, we only search for those types
@@ -277,7 +279,6 @@ public class MeilisearchMutateFilter(
         }
         else
         {
-            var path = context.HttpContext.Request.Path.ToString();
             // Handle direct endpoints and their types
             if (path.EndsWith("/Persons", true, CultureInfo.InvariantCulture))
             {
@@ -344,6 +345,12 @@ public class MeilisearchMutateFilter(
 
         var items = new List<BaseItem>();
         var maxTotal = limit > 0 ? limit : typeLimits.Values.Sum();
+
+        // Enforce hard limit of 5 for /Persons endpoint regardless of user-specified limit
+        if (path.EndsWith("/Persons", StringComparison.OrdinalIgnoreCase))
+        {
+            maxTotal = Math.Min(maxTotal, 5);
+        }
 
         foreach (var meilisearchItem in orderedItems)
         {
