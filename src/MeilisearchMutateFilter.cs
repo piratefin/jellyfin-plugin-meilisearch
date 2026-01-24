@@ -335,21 +335,34 @@ public class MeilisearchMutateFilter(
             .OrderBy(item => GetPriorityOrder(item.Type ?? string.Empty))
             .ToList();
 
-        // Calculate target count: if limit is specified, use it; otherwise use sum of all type limits
-        var targetCount = limit > 0 
-            ? limit 
-            : typeLimits.Values.Sum();
+        // Track per-type counts to enforce per-type limits
+        var typeCounts = new Dictionary<string, int>();
+        foreach (var itemType in filteredTypes)
+        {
+            typeCounts[itemType] = 0;
+        }
 
         var items = new List<BaseItem>();
+        var maxTotal = limit > 0 ? limit : typeLimits.Values.Sum();
 
         foreach (var meilisearchItem in orderedItems)
         {
-            if (items.Count >= targetCount) break; // Early exit once we have enough results
-            
+            if (items.Count >= maxTotal) break;
+
+            var itemType = meilisearchItem.Type ?? string.Empty;
+            var typeLimit = typeLimits.GetValueOrDefault(itemType, 3);
+
+            // Skip if this type has reached its limit
+            if (typeCounts.GetValueOrDefault(itemType, 0) >= typeLimit)
+            {
+                continue;
+            }
+
             var item = libraryManager.GetItemById(Guid.Parse(meilisearchItem.Guid));
             if (item?.IsVisibleStandalone(user) == true)
             {
                 items.Add(item);
+                typeCounts[itemType] = typeCounts.GetValueOrDefault(itemType, 0) + 1;
             }
         }
 
